@@ -74,11 +74,11 @@
 
   <div id="status">Chưa chọn file.</div>
   <div class="hint">
-    Flex / luồng thường → Auto Layout; grid đều → Wrap. Media query được đo lại cho từng màn hình. HTML không chạy JavaScript.
+    Flex / luồng thường → Auto Layout; grid đều → Wrap. Media query được đo lại cho từng màn hình. Hỗ trợ Tailwind v4; script ứng dụng không chạy.
   </div>
 
   <div id="previewWrap">
-    <iframe id="preview" sandbox="allow-same-origin"></iframe>
+    <iframe id="preview" sandbox="allow-scripts allow-same-origin"></iframe>
   </div>
 
 <script>
@@ -225,11 +225,21 @@ function prepareSource(){
   if(format==='dom' || format==='auto' && (data.tag || data.root?.tag && !data.root?.rect)) return {html:Lemon.domHTML(data,JSON.parse(mappingEl.value)),tokens:data.tokens||{}};
   return {scene:Lemon.normalize(data)};
 }
+function isTailwindV4Source(src){
+  try {const u=new URL(src);return u.protocol==='https:' && ['cdn.jsdelivr.net','unpkg.com'].includes(u.hostname) && /^\/(?:npm\/)?@tailwindcss\/browser@4(?:\.\d+){0,2}(?:\/dist\/index\.global\.js)?\/?$/.test(u.pathname);}catch(_){return false;}
+}
 function sanitizedHTML(html){
   const doc=new DOMParser().parseFromString(html,'text/html');
-  if(doc.querySelector('script')) captureWarnings.push('HTML có JavaScript: script không chạy. Với trang phụ thuộc JS/Tailwind CDN, hãy dùng export-devtools.js trên trang đã render.');
+  const scripts=[...doc.querySelectorAll('script')];
+  const tailwind=scripts.some(n=>isTailwindV4Source(n.getAttribute('src')||''));
+  if(scripts.some(n=>!isTailwindV4Source(n.getAttribute('src')||''))) captureWarnings.push('Script ứng dụng không chạy trong preview; chỉ trình biên dịch Tailwind v4 được tải.');
+  if(doc.querySelector('style[type="text/tailwindcss"]') && !tailwind) throw new Error('HTML có CSS Tailwind nhưng thiếu trình biên dịch Tailwind v4 được hỗ trợ.');
   doc.querySelectorAll('script,iframe,object,embed,base,meta[http-equiv]').forEach(n=>n.remove());
   doc.querySelectorAll('*').forEach(el=>{for(const a of [...el.attributes]) if(/^on/i.test(a.name) || ['srcdoc'].includes(a.name) || /^(?:javascript|vbscript):/i.test(a.value.trim())) el.removeAttribute(a.name);});
+  if(tailwind){
+    const marker=doc.createElement('div');marker.id='lemon-tailwind-ready';marker.className='hidden';marker.setAttribute('aria-hidden','true');doc.body.appendChild(marker);
+    const compiler=doc.createElement('script');compiler.src='https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4';doc.head.appendChild(compiler);
+  }
   return '<!doctype html>'+doc.documentElement.outerHTML;
 }
 function timeout(promise,ms,label){return Promise.race([promise,new Promise((_,reject)=>setTimeout(()=>reject(new Error(label)),ms))]);}
@@ -506,6 +516,15 @@ async function renderSource(viewportWidth=Number(widthEl.value)||1440){
     iframe.srcdoc=sanitizedHTML(sourceHtml);
   });
   const doc=iframe.contentDocument;
+  const marker=doc.getElementById('lemon-tailwind-ready');
+  if(marker){
+    const deadline=Date.now()+15000;
+    while(doc.defaultView.getComputedStyle(marker).display!=='none'){
+      if(Date.now()>deadline) throw new Error('Tailwind chưa tải/biên dịch xong. Dừng import để tránh tạo bố cục mất CSS. Kiểm tra kết nối CDN rồi thử lại.');
+      await wait(50);
+    }
+    marker.remove();
+  }
   if(doc.fonts) await timeout(doc.fonts.ready,10000,'Font tải quá lâu');
   await timeout(Promise.all([...doc.images].map(img=>img.complete?Promise.resolve():new Promise(r=>{img.onload=r;img.onerror=r;}))),10000,'Ảnh tải quá lâu').catch(e=>captureWarnings.push(e.message));
   await wait(Math.max(0,Math.min(10000,Number(delayEl.value)||0)));

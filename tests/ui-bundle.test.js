@@ -7,3 +7,12 @@ function ui(){
 test('shipped UI bundle parses and installs file/import handlers',()=>{const e=ui();assert.equal(typeof e.get('file').listeners.change,'function');assert.equal(typeof e.get('importBtn').listeners.click,'function');});
 test('selecting valid JSON updates status and enables import',async()=>{const e=ui();e.get('file').files=[{name:'scene.json',size:200,text:async()=>fs.readFileSync('examples/scene.json','utf8')}];await e.get('file').listeners.change();assert.match(e.get('status').textContent,/scene.json.*Sẵn sàng import/);assert.equal(e.get('importBtn').disabled,false);});
 test('file read failure is reported instead of leaving no-file status',async()=>{const e=ui();e.get('file').files=[{name:'broken.html',size:20,text:async()=>{throw Error('Read failed')}}];await e.get('file').listeners.change();assert.match(e.get('status').textContent,/broken.html: Read failed/);assert.equal(e.get('importBtn').disabled,true);});
+
+test('Tailwind compiler detection accepts known CDN v4 only',()=>{
+ const script=fs.readFileSync('src/ui.js','utf8');const fn=script.slice(script.indexOf('function isTailwindV4Source'),script.indexOf('function sanitizedHTML'));
+ const scope={URL};vm.createContext(scope);vm.runInContext(fn,scope);
+ assert.equal(scope.isTailwindV4Source('https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4'),true);
+ assert.equal(scope.isTailwindV4Source('https://unpkg.com/@tailwindcss/browser@4.1.0/dist/index.global.js'),true);
+ assert.equal(scope.isTailwindV4Source('https://example.com/tailwind.js'),false);
+ assert.equal(scope.isTailwindV4Source('https://cdn.jsdelivr.net/npm/evil'),false);
+});

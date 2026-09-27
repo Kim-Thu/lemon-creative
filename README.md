@@ -65,7 +65,7 @@ Master được đặt trong khung **Components**, màn hình dùng instance. Ch
 
 ## Trang cần JavaScript / Tailwind CDN
 
-Preview không chạy JavaScript trong nguồn HTML. Dùng HTML có CSS đã biên dịch, hoặc:
+Preview hỗ trợ trình biên dịch Tailwind v4 từ jsDelivr/unpkg; plugin chờ CSS biên dịch xong trước khi đo layout và dừng nếu CDN không tải được. Script ứng dụng khác không chạy. Với trang phụ thuộc JavaScript ứng dụng, dùng HTML có CSS đã biên dịch, hoặc:
 
 1. Mở trang thật trong Chrome; đợi trang và font tải xong.
 2. Chạy nội dung `export-devtools.js` trong DevTools Console.
