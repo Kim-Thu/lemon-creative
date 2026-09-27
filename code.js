@@ -304,9 +304,9 @@ function applyAutoChildSizing(node, data, parent) {
   const vertical = l.height || (parent.layoutMode === "HORIZONTAL" && l.fillsParentHeight ? "FILL" : canHug && (l.contentSized || l.autoHeight) ? "HUG" : "FIXED");
   node.layoutSizingHorizontal = horizontal === "HUG" && !canHug ? "FIXED" : horizontal;
   node.layoutSizingVertical = vertical === "HUG" && !canHug ? "FIXED" : vertical;
-  if (l.minWidth != null) node.minWidth = Math.max(0,l.minWidth);
+  if (l.minWidth != null) node.minWidth = Number.isFinite(Number(l.minWidth)) && Number(l.minWidth) > 0 ? Number(l.minWidth) : null;
   if (l.maxWidth != null) node.maxWidth = Math.max(1,l.maxWidth);
-  if (l.minHeight != null) node.minHeight = Math.max(0,l.minHeight);
+  if (l.minHeight != null) node.minHeight = Number.isFinite(Number(l.minHeight)) && Number(l.minHeight) > 0 ? Number(l.minHeight) : null;
   if (l.maxHeight != null) node.maxHeight = Math.max(1,l.maxHeight);
 }
 

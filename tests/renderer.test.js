@@ -4,6 +4,7 @@ function harness(){
  function node(type){const n={id:String(++id),type,name:'',children:[],fills:[],strokes:[],width:100,height:100,x:0,y:0,opacity:1,removed:false,boundVariables:{},resize(w,h){assert(w>0&&h>0);this.width=w;this.height=h;},appendChild(c){if(c.parent)c.parent.children=c.parent.children.filter(x=>x!==c);this.children.push(c);c.parent=this;},remove(){this.removed=true;if(this.parent)this.parent.children=this.parent.children.filter(x=>x!==this);},setBoundVariable(k,v){this.boundVariables[k]={id:v.id};}};
  if(['FRAME','COMPONENT','INSTANCE'].includes(type)){n.layoutMode='NONE';n.paddingTop=n.paddingRight=n.paddingBottom=n.paddingLeft=n.itemSpacing=0;n.clipsContent=true;n.topLeftRadius=n.topRightRadius=n.bottomLeftRadius=n.bottomRightRadius=0;}
  for(const axis of ['Horizontal','Vertical'])Object.defineProperty(n,'layoutSizing'+axis,{set(v){assert(['FIXED','HUG','FILL'].includes(v));if(v==='FILL')assert(this.parent?.layoutMode&&this.parent.layoutMode!=='NONE');if(v==='HUG')assert(type==='TEXT'||this.layoutMode&&this.layoutMode!=='NONE');this['_'+axis]=v;},get(){return this['_'+axis]}});
+ for(const field of ['minWidth','minHeight'])Object.defineProperty(n,field,{set(v){assert(v===null||Number.isFinite(v)&&v>0,field+' must be positive or null');this['_'+field]=v;},get(){return this['_'+field]}});
  if(type==='TEXT')Object.defineProperty(n,'characters',{set(v){assert.equal(typeof v,'string');this._text=v;},get(){return this._text}});
  return n;}
  const page=node('PAGE');const make=t=>{const n=node(t);page.appendChild(n);return n;};
@@ -13,3 +14,12 @@ function harness(){
 test('full message handler builds native component and token data',async()=>{const h=harness();await h.figma.ui.onmessage({type:'import',raw:fs.readFileSync('examples/scene.json','utf8')});assert.equal(h.messages.at(-1).type,'import-done');assert.equal(h.messages.at(-1).components,1);assert(h.messages.at(-1).tokens>0);assert(h.page.children.some(n=>n.name.includes('Components')));});
 test('corrupt input leaves existing canvas untouched',async()=>{const h=harness();const existing=h.figma.createFrame();await h.figma.ui.onmessage({type:'import',raw:'{"root":{"type":"TEXT","text":{"wrapped":true}}}'});assert.equal(h.messages.at(-1).type,'import-error');assert.deepEqual(h.page.children,[existing]);});
 test('font failure removes generated frames and variables',async()=>{const h=harness();h.figma.loadFontAsync=async()=>{throw Error('font unavailable')};await h.figma.ui.onmessage({type:'import',raw:fs.readFileSync('examples/scene.json','utf8')});assert.equal(h.messages.at(-1).type,'import-error');assert(h.vars.every(v=>v.removed));assert(h.collections.every(v=>v.removed));/* Detached text is tracked separately by renderer. */assert.equal(h.page.children.length,0);});
+
+test('CSS zero minimums become null, positive minimums are preserved',async()=>{
+ const h=harness();const fixture={root:{name:'Page',layout:{mode:'VERTICAL',minWidth:0,minHeight:0},children:[{type:'TEXT',text:'Content',layout:{minWidth:80,minHeight:24}}]}};
+ await h.figma.ui.onmessage({type:'import',raw:JSON.stringify(fixture)});
+ assert.equal(h.messages.at(-1).type,'import-done');
+ const page=h.page.children.find(n=>n.name.includes('Screen')).children[0];
+ assert.equal(page.minWidth,null);assert.equal(page.minHeight,null);
+ assert.equal(page.children[0].minWidth,80);assert.equal(page.children[0].minHeight,24);
+});
