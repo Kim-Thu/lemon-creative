@@ -3,22 +3,366 @@
 <head>
 <meta charset="utf-8">
 <style>
-body{font:12px Inter,system-ui,sans-serif;margin:0;padding:16px}
-textarea{width:100%;height:280px;box-sizing:border-box;font:11px/1.4 ui-monospace,monospace;padding:10px}
-button{width:100%;padding:10px;margin-top:10px;border:0;border-radius:8px;background:#18a0fb;color:#fff;font-weight:700}
-p{color:#666;line-height:1.5}
+  *{box-sizing:border-box}
+  body{
+    margin:0;padding:18px;font:12px/1.5 Inter,system-ui,sans-serif;
+    color:var(--figma-color-text);background:var(--figma-color-bg)
+  }
+  h1{font-size:16px;margin:0 0 6px}
+  p{color:var(--figma-color-text-secondary);margin:0 0 14px}
+  label{display:block;font-weight:600;margin:12px 0 6px}
+  input[type=file],input[type=number]{
+    width:100%;border:1px solid var(--figma-color-border);
+    background:var(--figma-color-bg-secondary);color:var(--figma-color-text);
+    border-radius:8px;padding:9px
+  }
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  button{
+    width:100%;border:0;border-radius:8px;padding:10px 12px;
+    font-weight:700;cursor:pointer
+  }
+  #importBtn{background:#18a0fb;color:white;margin-top:14px}
+  #importBtn:disabled{opacity:.45;cursor:not-allowed}
+  .secondary{
+    background:var(--figma-color-bg-secondary);color:var(--figma-color-text);
+    border:1px solid var(--figma-color-border);margin-top:8px
+  }
+  #status{
+    margin-top:12px;padding:10px;border-radius:8px;
+    background:var(--figma-color-bg-secondary);min-height:38px
+  }
+  .hint{font-size:11px;color:var(--figma-color-text-tertiary);margin-top:8px}
+  #previewWrap{
+    height:220px;margin-top:14px;overflow:hidden;border:1px solid var(--figma-color-border);
+    border-radius:8px;background:white;position:relative
+  }
+  #preview{
+    position:absolute;left:0;top:0;transform-origin:0 0;border:0;background:white
+  }
 </style>
 </head>
 <body>
-  <p>Dán JSON được export từ Chrome DevTools vào đây. Plugin sẽ dựng lại hierarchy và tạo Auto Layout cho flex/grid.</p>
-  <textarea id="json" placeholder="Dán JSON ở đây..."></textarea>
-  <button id="go">Import vào Figma</button>
-  <script>
-    document.getElementById("go").onclick = () => {
-      const raw = document.getElementById("json").value.trim();
-      if (!raw) return;
-      parent.postMessage({ pluginMessage: { type: "import", raw } }, "*");
+  <h1>HTML → Figma</h1>
+  <p>Chọn file HTML. Plugin render trang rồi dựng lại hierarchy và Auto Layout trong Figma.</p>
+
+  <label>1. Chọn file HTML</label>
+  <input id="file" type="file" accept=".html,.htm,text/html">
+
+  <div class="row">
+    <div>
+      <label>Viewport width</label>
+      <input id="width" type="number" value="1440" min="320" max="2560">
+    </div>
+    <div>
+      <label>Chờ render (ms)</label>
+      <input id="delay" type="number" value="2500" min="0" max="10000">
+    </div>
+  </div>
+
+  <button id="importBtn" disabled>Render và import vào Figma</button>
+  <button id="closeBtn" class="secondary">Đóng</button>
+
+  <div id="status">Chưa chọn file.</div>
+  <div class="hint">
+    Flex → Auto Layout, Grid → Figma Grid, absolute/fixed giữ absolute positioning.
+  </div>
+
+  <div id="previewWrap">
+    <iframe id="preview" sandbox="allow-scripts allow-same-origin"></iframe>
+  </div>
+
+<script>
+const fileEl = document.getElementById("file");
+const widthEl = document.getElementById("width");
+const delayEl = document.getElementById("delay");
+const importBtn = document.getElementById("importBtn");
+const closeBtn = document.getElementById("closeBtn");
+const statusEl = document.getElementById("status");
+const iframe = document.getElementById("preview");
+const wrap = document.getElementById("previewWrap");
+
+let sourceHtml = "";
+
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const px = v => {
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : 0;
+};
+const round = n => Math.round(n * 100) / 100;
+
+function rgba(s){
+  const m = String(s || "").match(/rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.]+))?\s*\)/i);
+  if(!m) return null;
+  return {r:+m[1]/255,g:+m[2]/255,b:+m[3]/255,a:m[4]==null?1:+m[4]};
+}
+
+function parseShadow(s){
+  if(!s || s === "none") return null;
+  const color = s.match(/rgba?\([^)]+\)/)?.[0] || null;
+  const nums = s.replace(/rgba?\([^)]+\)/,"").match(/-?\d*\.?\d+px/g) || [];
+  return {
+    color:rgba(color),x:px(nums[0]),y:px(nums[1]),
+    blur:px(nums[2]),spread:px(nums[3]),inset:/\binset\b/.test(s)
+  };
+}
+
+function visible(el,cs,r){
+  return r.width>.5 && r.height>.5 && cs.display!=="none" &&
+    cs.visibility!=="hidden" && px(cs.opacity||1)>.001;
+}
+
+function rectOf(el){
+  const r=el.getBoundingClientRect();
+  return {x:round(r.left),y:round(r.top),w:round(r.width),h:round(r.height)};
+}
+
+function rangeRect(doc,node){
+  const rg=doc.createRange();
+  rg.selectNodeContents(node);
+  const r=rg.getBoundingClientRect();
+  return {x:round(r.left),y:round(r.top),w:round(r.width),h:round(r.height)};
+}
+
+function styleInfo(cs){
+  return {
+    opacity:px(cs.opacity||1),
+    background:rgba(cs.backgroundColor),
+    color:rgba(cs.color),
+    border:{
+      top:px(cs.borderTopWidth),right:px(cs.borderRightWidth),
+      bottom:px(cs.borderBottomWidth),left:px(cs.borderLeftWidth),
+      color:rgba(cs.borderTopColor)
+    },
+    radius:{
+      tl:px(cs.borderTopLeftRadius),tr:px(cs.borderTopRightRadius),
+      br:px(cs.borderBottomRightRadius),bl:px(cs.borderBottomLeftRadius)
+    },
+    shadow:parseShadow(cs.boxShadow),
+    overflow:{x:cs.overflowX,y:cs.overflowY},
+    font:{
+      family:cs.fontFamily.split(",")[0].replace(/["']/g,"").trim(),
+      size:px(cs.fontSize),weight:parseInt(cs.fontWeight,10)||400,
+      lineHeight:cs.lineHeight==="normal"?px(cs.fontSize)*1.2:px(cs.lineHeight),
+      letterSpacing:cs.letterSpacing==="normal"?0:px(cs.letterSpacing),
+      align:cs.textAlign,style:cs.fontStyle||"normal"
+    }
+  };
+}
+
+function tracks(value){
+  if(!value || value==="none") return [];
+  return value.trim().split(/\s+/).map(px).filter(n=>n>0);
+}
+
+function layoutInfo(el,cs){
+  const p=el.parentElement;
+  const pcs=p?el.ownerDocument.defaultView.getComputedStyle(p):null;
+  const pr=p?p.getBoundingClientRect():null;
+  const r=el.getBoundingClientRect();
+  const innerW=pr&&pcs?pr.width-px(pcs.paddingLeft)-px(pcs.paddingRight):null;
+  const innerH=pr&&pcs?pr.height-px(pcs.paddingTop)-px(pcs.paddingBottom):null;
+
+  const common={
+    display:cs.display,position:cs.position,
+    zIndex:cs.zIndex==="auto"?null:parseInt(cs.zIndex,10)||0,
+    margin:{top:px(cs.marginTop),right:px(cs.marginRight),bottom:px(cs.marginBottom),left:px(cs.marginLeft)},
+    flexItem:{grow:px(cs.flexGrow),shrink:px(cs.flexShrink),basis:cs.flexBasis},
+    alignSelf:cs.alignSelf,
+    fillsParentWidth:innerW!=null&&Math.abs(r.width-innerW)<=2,
+    fillsParentHeight:innerH!=null&&Math.abs(r.height-innerH)<=2,
+    contentSized:["inline","inline-block","inline-flex"].includes(cs.display)
+  };
+
+  if(cs.display==="flex"||cs.display==="inline-flex"){
+    const horizontal=["row","row-reverse"].includes(cs.flexDirection);
+    return {
+      ...common,mode:horizontal?"HORIZONTAL":"VERTICAL",
+      reverse:cs.flexDirection.endsWith("reverse"),
+      wrap:cs.flexWrap!=="nowrap",gap:px(cs.gap),
+      rowGap:px(cs.rowGap||cs.gap),columnGap:px(cs.columnGap||cs.gap),
+      padding:{top:px(cs.paddingTop),right:px(cs.paddingRight),bottom:px(cs.paddingBottom),left:px(cs.paddingLeft)},
+      justify:cs.justifyContent,align:cs.alignItems
     };
-  </script>
+  }
+
+  if(cs.display==="grid"||cs.display==="inline-grid"){
+    const columns=tracks(cs.gridTemplateColumns);
+    const rows=tracks(cs.gridTemplateRows);
+    return {
+      ...common,mode:"GRID",
+      padding:{top:px(cs.paddingTop),right:px(cs.paddingRight),bottom:px(cs.paddingBottom),left:px(cs.paddingLeft)},
+      columnGap:px(cs.columnGap||cs.gap),rowGap:px(cs.rowGap||cs.gap),
+      columns,rows,
+      columnCount:Math.max(1,columns.length||1),
+      rowCount:Math.max(1,rows.length||Math.ceil(el.children.length/Math.max(1,columns.length||1)))
+    };
+  }
+
+  return {...common,mode:"NONE"};
+}
+
+function getName(el){
+  return el.getAttribute("data-figma-name") ||
+    el.getAttribute("aria-label") ||
+    el.getAttribute("title") ||
+    (el.tagName==="IMG"?el.getAttribute("alt"):"") ||
+    (el.id?el.tagName.toLowerCase()+"#"+el.id:el.tagName.toLowerCase());
+}
+
+async function imageData(src,doc){
+  if(!src) return null;
+  if(src.startsWith("data:")) return src;
+  try{
+    const absolute=new URL(src,doc.baseURI).href;
+    const res=await fetch(absolute,{mode:"cors",credentials:"omit"});
+    if(!res.ok) return null;
+    const blob=await res.blob();
+    return await new Promise((resolve,reject)=>{
+      const fr=new FileReader();
+      fr.onload=()=>resolve(fr.result);
+      fr.onerror=reject;
+      fr.readAsDataURL(blob);
+    });
+  }catch(_){ return null; }
+}
+
+async function snapshot(doc){
+  const win=doc.defaultView;
+  const skip=new Set(["SCRIPT","STYLE","NOSCRIPT","LINK","META","HEAD","TEMPLATE"]);
+
+  async function walk(el,depth=0){
+    if(depth>60||skip.has(el.tagName)) return null;
+
+    const cs=win.getComputedStyle(el);
+    const r=el.getBoundingClientRect();
+    if(!visible(el,cs,r)) return null;
+
+    const style=styleInfo(cs);
+    const type=el.tagName==="IMG"?"IMAGE":el.tagName==="SVG"?"SVG":"FRAME";
+
+    const node={
+      type,tag:el.tagName.toLowerCase(),name:getName(el),
+      rect:rectOf(el),style,layout:layoutInfo(el,cs),children:[]
+    };
+
+    if(type==="IMAGE"){
+      node.src=el.currentSrc||el.src;
+      node.alt=el.alt||"Image";
+      node.objectFit=cs.objectFit||"cover";
+      node.dataUrl=await imageData(node.src,doc);
+      return node;
+    }
+
+    if(type==="SVG"){
+      node.svg=el.outerHTML;
+      return node;
+    }
+
+    for(const childNode of [...el.childNodes]){
+      if(childNode.nodeType!==Node.TEXT_NODE) continue;
+      const text=childNode.textContent.replace(/\s+/g," ").trim();
+      if(!text) continue;
+      const tr=rangeRect(doc,childNode);
+      if(tr.w<=.5||tr.h<=.5) continue;
+      const lineHeight=style.font.lineHeight||style.font.size*1.2;
+      node.children.push({
+        type:"TEXT",name:text.slice(0,80),text,rect:tr,style,
+        layout:{mode:"NONE",position:"static",contentSized:tr.h<=lineHeight*1.35,fillsParentWidth:false,fillsParentHeight:false},
+        text:{wrapped:tr.h>lineHeight*1.35},children:[]
+      });
+    }
+
+    for(const child of el.children){
+      const c=await walk(child,depth+1);
+      if(c) node.children.push(c);
+    }
+
+    return node;
+  }
+
+  return {
+    version:3,
+    title:doc.title||"HTML Import",
+    viewport:{
+      width:Math.max(doc.documentElement.scrollWidth,doc.body.scrollWidth,parseInt(iframe.style.width)||1440),
+      height:Math.max(doc.documentElement.scrollHeight,doc.body.scrollHeight)
+    },
+    root:await walk(doc.body)
+  };
+}
+
+async function renderSource(){
+  const viewportWidth=Math.max(320,Number(widthEl.value)||1440);
+  iframe.style.width=viewportWidth+"px";
+  iframe.style.height="1200px";
+  iframe.srcdoc=sourceHtml;
+
+  await new Promise((resolve,reject)=>{
+    const timeout=setTimeout(()=>reject(new Error("HTML render timeout")),15000);
+    iframe.onload=()=>{clearTimeout(timeout);resolve();};
+  });
+
+  const doc=iframe.contentDocument;
+  try{ if(doc.fonts&&doc.fonts.ready) await doc.fonts.ready; }catch(_){}
+  await wait(Math.max(0,Number(delayEl.value)||0));
+
+  const scale=Math.min(
+    wrap.clientWidth/viewportWidth,
+    wrap.clientHeight/Math.max(1,doc.documentElement.scrollHeight),
+    .28
+  );
+  iframe.style.transform="scale("+Math.max(.08,scale)+")";
+  return doc;
+}
+
+fileEl.addEventListener("change",async()=>{
+  const file=fileEl.files&&fileEl.files[0];
+  if(!file)return;
+  sourceHtml=await file.text();
+  importBtn.disabled=false;
+  statusEl.textContent="Đã đọc "+file.name+". Đang tạo preview...";
+  try{
+    await renderSource();
+    statusEl.textContent="Preview xong: "+file.name;
+  }catch(e){
+    statusEl.textContent="Preview lỗi: "+e.message;
+  }
+});
+
+importBtn.addEventListener("click",async()=>{
+  if(!sourceHtml)return;
+  importBtn.disabled=true;
+  statusEl.textContent="Đang render HTML...";
+  try{
+    const doc=await renderSource();
+    statusEl.textContent="Đang đọc DOM, text bounds và Auto Layout...";
+    const payload=await snapshot(doc);
+    parent.postMessage({
+      pluginMessage:{type:"import",raw:JSON.stringify(payload)}
+    },"*");
+    statusEl.textContent="Đã gửi dữ liệu sang Figma...";
+  }catch(e){
+    statusEl.textContent="Lỗi: "+e.message;
+    importBtn.disabled=false;
+  }
+});
+
+closeBtn.addEventListener("click",()=>{
+  parent.postMessage({pluginMessage:{type:"close"}},"*");
+});
+
+onmessage=(event)=>{
+  const msg=event.data.pluginMessage;
+  if(!msg)return;
+  if(msg.type==="import-done"){
+    statusEl.textContent="Import xong.";
+    importBtn.disabled=false;
+  }
+  if(msg.type==="import-error"){
+    statusEl.textContent="Import lỗi: "+msg.message;
+    importBtn.disabled=false;
+  }
+};
+</script>
 </body>
 </html>
