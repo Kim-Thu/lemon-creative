@@ -1,17 +1,21 @@
-(() => {
+;(async () => {
   const cfg = {
-    maxDepth: 40,
+    maxDepth: 60,
     copyToClipboard: true,
-    download: true
+    download: true,
+    embedImages: true,
+    imageConcurrency: 6
   };
 
-  const px = v => {
+  const px = (v) => {
     const n = parseFloat(v);
     return Number.isFinite(n) ? n : 0;
   };
 
-  const rgba = s => {
-    const m = String(s || "").match(/rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.]+))?\s*\)/i);
+  const rgba = (s) => {
+    const m = String(s || "").match(
+      /rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.]+))?\s*\)/i
+    );
     if (!m) return null;
     return {
       r: +m[1] / 255,
@@ -21,30 +25,38 @@
     };
   };
 
-  const isVisible = (el, cs, r) =>
-    r.width > .5 &&
-    r.height > .5 &&
-    cs.display !== "none" &&
-    cs.visibility !== "hidden" &&
-    px(cs.opacity || 1) > .001;
+  const round = (n) => Math.round(n * 100) / 100;
 
-  const rect = el => {
+  const elementRect = (el) => {
     const r = el.getBoundingClientRect();
     return {
-      x: r.left + scrollX,
-      y: r.top + scrollY,
-      w: r.width,
-      h: r.height
+      x: round(r.left + scrollX),
+      y: round(r.top + scrollY),
+      w: round(r.width),
+      h: round(r.height)
     };
   };
 
-  const textDirect = el => [...el.childNodes]
-    .filter(n => n.nodeType === Node.TEXT_NODE)
-    .map(n => n.textContent.replace(/\s+/g, " ").trim())
-    .filter(Boolean)
-    .join(" ");
+  const rangeRect = (node) => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const r = range.getBoundingClientRect();
+    return {
+      x: round(r.left + scrollX),
+      y: round(r.top + scrollY),
+      w: round(r.width),
+      h: round(r.height)
+    };
+  };
 
-  const parseShadow = s => {
+  const isVisible = (el, cs, r) =>
+    r.width > 0.5 &&
+    r.height > 0.5 &&
+    cs.display !== "none" &&
+    cs.visibility !== "hidden" &&
+    px(cs.opacity || 1) > 0.001;
+
+  const parseShadow = (s) => {
     if (!s || s === "none") return null;
     const color = s.match(/rgba?\([^)]+\)/)?.[0] || null;
     const nums = s.replace(/rgba?\([^)]+\)/, "").match(/-?\d*\.?\d+px/g) || [];
@@ -53,58 +65,47 @@
       x: px(nums[0]),
       y: px(nums[1]),
       blur: px(nums[2]),
-      spread: px(nums[3])
+      spread: px(nums[3]),
+      inset: /\binset\b/.test(s)
     };
   };
 
-  const layoutInfo = (el, cs) => {
-    const display = cs.display;
-
-    if (display === "flex" || display === "inline-flex") {
-      const dir = cs.flexDirection;
-      const horizontal = dir === "row" || dir === "row-reverse";
-      return {
-        mode: horizontal ? "HORIZONTAL" : "VERTICAL",
-        wrap: cs.flexWrap !== "nowrap",
-        gap: px(horizontal ? (cs.columnGap || cs.gap) : (cs.rowGap || cs.gap)),
-        rowGap: px(cs.rowGap || cs.gap),
-        columnGap: px(cs.columnGap || cs.gap),
-        padding: {
-          top: px(cs.paddingTop),
-          right: px(cs.paddingRight),
-          bottom: px(cs.paddingBottom),
-          left: px(cs.paddingLeft)
-        },
-        justify: cs.justifyContent,
-        align: cs.alignItems
-      };
-    }
-
-    if (display === "grid" || display === "inline-grid") {
-      return {
-        mode: "GRID",
-        wrap: true,
-        gap: px(cs.gap),
-        rowGap: px(cs.rowGap || cs.gap),
-        columnGap: px(cs.columnGap || cs.gap),
-        padding: {
-          top: px(cs.paddingTop),
-          right: px(cs.paddingRight),
-          bottom: px(cs.paddingBottom),
-          left: px(cs.paddingLeft)
-        },
-        columns: cs.gridTemplateColumns
-          .split(/\s+/)
-          .filter(Boolean)
-          .map(px)
-          .filter(n => n > 0)
-      };
-    }
-
-    return { mode: "NONE" };
+  const parseTrackSizes = (value) => {
+    if (!value || value === "none") return [];
+    return value
+      .trim()
+      .split(/\s+/)
+      .map(px)
+      .filter((n) => n > 0);
   };
 
-  const styleInfo = cs => ({
+  const getDirectTextNodes = (el) =>
+    [...el.childNodes].filter(
+      (n) => n.nodeType === Node.TEXT_NODE && n.textContent.replace(/\s+/g, " ").trim()
+    );
+
+  const getName = (el) => {
+    const explicit = el.getAttribute("data-figma-name");
+    if (explicit) return explicit;
+
+    const semantic =
+      el.getAttribute("aria-label") ||
+      el.getAttribute("title") ||
+      (el.tagName === "IMG" ? el.getAttribute("alt") : "");
+    if (semantic) return semantic.slice(0, 80);
+
+    if (el.id) return `${el.tagName.toLowerCase()}#${el.id}`;
+
+    const usefulClasses = [...el.classList]
+      .filter((c) => !c.includes("[") && !c.includes(":") && c.length < 40)
+      .slice(0, 2);
+
+    return usefulClasses.length
+      ? `${el.tagName.toLowerCase()}.${usefulClasses.join(".")}`
+      : el.tagName.toLowerCase();
+  };
+
+  const styleInfo = (cs) => ({
     opacity: px(cs.opacity || 1),
     background: rgba(cs.backgroundColor),
     color: rgba(cs.color),
@@ -122,42 +123,160 @@
       bl: px(cs.borderBottomLeftRadius)
     },
     shadow: parseShadow(cs.boxShadow),
+    overflow: {
+      x: cs.overflowX,
+      y: cs.overflowY
+    },
     font: {
       family: cs.fontFamily.split(",")[0].replace(/["']/g, "").trim(),
       size: px(cs.fontSize),
       weight: parseInt(cs.fontWeight, 10) || 400,
-      lineHeight: cs.lineHeight === "normal" ? null : px(cs.lineHeight),
+      lineHeight: cs.lineHeight === "normal" ? px(cs.fontSize) * 1.2 : px(cs.lineHeight),
       letterSpacing: cs.letterSpacing === "normal" ? 0 : px(cs.letterSpacing),
-      align: cs.textAlign
+      align: cs.textAlign,
+      style: cs.fontStyle || "normal"
     }
   });
 
-  const nodeType = el => {
+  const layoutInfo = (el, cs) => {
+    const display = cs.display;
+    const p = el.parentElement;
+    const pcs = p ? getComputedStyle(p) : null;
+    const pr = p ? p.getBoundingClientRect() : null;
+    const r = el.getBoundingClientRect();
+
+    const parentInnerW = pr && pcs
+      ? pr.width - px(pcs.paddingLeft) - px(pcs.paddingRight)
+      : null;
+    const parentInnerH = pr && pcs
+      ? pr.height - px(pcs.paddingTop) - px(pcs.paddingBottom)
+      : null;
+
+    const fillsParentWidth =
+      parentInnerW != null && Math.abs(r.width - parentInnerW) <= 2;
+    const fillsParentHeight =
+      parentInnerH != null && Math.abs(r.height - parentInnerH) <= 2;
+
+    const common = {
+      display,
+      position: cs.position,
+      zIndex: cs.zIndex === "auto" ? null : parseInt(cs.zIndex, 10) || 0,
+      margin: {
+        top: px(cs.marginTop),
+        right: px(cs.marginRight),
+        bottom: px(cs.marginBottom),
+        left: px(cs.marginLeft)
+      },
+      flexItem: {
+        grow: px(cs.flexGrow),
+        shrink: px(cs.flexShrink),
+        basis: cs.flexBasis
+      },
+      alignSelf: cs.alignSelf,
+      fillsParentWidth,
+      fillsParentHeight,
+      contentSized:
+        display === "inline" ||
+        display === "inline-block" ||
+        display === "inline-flex"
+    };
+
+    if (display === "flex" || display === "inline-flex") {
+      const horizontal = ["row", "row-reverse"].includes(cs.flexDirection);
+      return {
+        ...common,
+        mode: horizontal ? "HORIZONTAL" : "VERTICAL",
+        reverse: cs.flexDirection.endsWith("reverse"),
+        wrap: cs.flexWrap !== "nowrap",
+        gap: px(cs.gap),
+        rowGap: px(cs.rowGap || cs.gap),
+        columnGap: px(cs.columnGap || cs.gap),
+        padding: {
+          top: px(cs.paddingTop),
+          right: px(cs.paddingRight),
+          bottom: px(cs.paddingBottom),
+          left: px(cs.paddingLeft)
+        },
+        justify: cs.justifyContent,
+        align: cs.alignItems
+      };
+    }
+
+    if (display === "grid" || display === "inline-grid") {
+      const columns = parseTrackSizes(cs.gridTemplateColumns);
+      const rows = parseTrackSizes(cs.gridTemplateRows);
+      return {
+        ...common,
+        mode: "GRID",
+        padding: {
+          top: px(cs.paddingTop),
+          right: px(cs.paddingRight),
+          bottom: px(cs.paddingBottom),
+          left: px(cs.paddingLeft)
+        },
+        columnGap: px(cs.columnGap || cs.gap),
+        rowGap: px(cs.rowGap || cs.gap),
+        columns,
+        rows,
+        columnCount: Math.max(1, columns.length || 1),
+        rowCount: Math.max(1, rows.length || Math.ceil(el.children.length / Math.max(1, columns.length || 1)))
+      };
+    }
+
+    return { ...common, mode: "NONE" };
+  };
+
+  const shouldSkip = (el) =>
+    ["SCRIPT", "STYLE", "NOSCRIPT", "LINK", "META", "HEAD", "TEMPLATE"].includes(el.tagName);
+
+  const nodeType = (el) => {
     if (el.tagName === "IMG") return "IMAGE";
     if (el.tagName === "SVG") return "SVG";
     return "FRAME";
   };
 
-  const shouldSkipElement = el =>
-    ["SCRIPT", "STYLE", "NOSCRIPT", "LINK", "META", "HEAD"].includes(el.tagName);
+  const textNodeData = (node, parentStyle) => {
+    const text = node.textContent.replace(/\s+/g, " ").trim();
+    if (!text) return null;
+
+    const r = rangeRect(node);
+    if (r.w <= 0.5 || r.h <= 0.5) return null;
+
+    const lineHeight = parentStyle.font.lineHeight || parentStyle.font.size * 1.2;
+    return {
+      type: "TEXT",
+      name: text.slice(0, 80),
+      text,
+      rect: r,
+      style: parentStyle,
+      layout: {
+        mode: "NONE",
+        position: "static",
+        contentSized: r.h <= lineHeight * 1.35,
+        fillsParentWidth: false,
+        fillsParentHeight: false
+      },
+      text: {
+        wrapped: r.h > lineHeight * 1.35
+      },
+      children: []
+    };
+  };
 
   function walk(el, depth = 0) {
-    if (depth > cfg.maxDepth || shouldSkipElement(el)) return null;
+    if (depth > cfg.maxDepth || shouldSkip(el)) return null;
 
     const cs = getComputedStyle(el);
     const r = el.getBoundingClientRect();
     if (!isVisible(el, cs, r)) return null;
 
+    const style = styleInfo(cs);
     const node = {
       type: nodeType(el),
       tag: el.tagName.toLowerCase(),
-      name: el.id
-        ? `${el.tagName.toLowerCase()}#${el.id}`
-        : el.classList?.length
-          ? `${el.tagName.toLowerCase()}.${[...el.classList].slice(0,2).join(".")}`
-          : el.tagName.toLowerCase(),
-      rect: rect(el),
-      style: styleInfo(cs),
+      name: getName(el),
+      rect: elementRect(el),
+      style,
       layout: layoutInfo(el, cs),
       children: []
     };
@@ -174,18 +293,9 @@
       return node;
     }
 
-    const direct = textDirect(el);
-
-    if (direct) {
-      node.children.push({
-        type: "TEXT",
-        name: direct.slice(0, 80),
-        text: direct,
-        rect: rect(el),
-        style: styleInfo(cs),
-        layout: { mode: "NONE" },
-        children: []
-      });
+    for (const textNode of getDirectTextNodes(el)) {
+      const t = textNodeData(textNode, style);
+      if (t) node.children.push(t);
     }
 
     for (const child of el.children) {
@@ -196,8 +306,43 @@
     return node;
   }
 
+  const imageNodes = [];
+  const collectImages = (node) => {
+    if (!node) return;
+    if (node.type === "IMAGE" && node.src) imageNodes.push(node);
+    for (const child of node.children || []) collectImages(child);
+  };
+
+  async function srcToDataUrl(src) {
+    if (!src || src.startsWith("data:")) return src || null;
+    try {
+      const response = await fetch(src, { mode: "cors", credentials: "omit" });
+      if (!response.ok) return null;
+      const blob = await response.blob();
+      return await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  async function runPool(items, worker, limit) {
+    let cursor = 0;
+    async function runner() {
+      while (cursor < items.length) {
+        const index = cursor++;
+        await worker(items[index], index);
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, runner));
+  }
+
   const page = {
-    version: 2,
+    version: 3,
     title: document.title || "HTML Import",
     viewport: {
       width: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth, innerWidth),
@@ -206,10 +351,21 @@
     root: walk(document.body)
   };
 
+  if (cfg.embedImages) {
+    collectImages(page.root);
+    await runPool(
+      imageNodes,
+      async (node) => {
+        node.dataUrl = await srcToDataUrl(node.src);
+      },
+      cfg.imageConcurrency
+    );
+  }
+
   const json = JSON.stringify(page);
 
   if (cfg.copyToClipboard) {
-    navigator.clipboard.writeText(json).catch(() => {});
+    await navigator.clipboard.writeText(json).catch(() => {});
   }
 
   if (cfg.download) {
@@ -225,6 +381,6 @@
     setTimeout(() => URL.revokeObjectURL(url), 2000);
   }
 
-  console.log("✅ Export xong JSON cấu trúc cho Figma.");
-  console.log("JSON cũng đã được copy vào clipboard.");
+  console.log("✅ Export HTML → Figma JSON v3 xong.");
+  console.log("Giữ DOM hierarchy, flex/grid, absolute positioning, text bounds và image data khi CORS cho phép.");
 })();
