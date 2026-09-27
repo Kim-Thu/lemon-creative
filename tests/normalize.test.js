@@ -1,0 +1,9 @@
+const {test}=require('node:test');const assert=require('node:assert/strict');const L=require('../src/normalize');
+test('scene tokens resolve and text is not overwritten',()=>{const x=L.normalize(require('../examples/scene.json'));assert.equal(x.screens[0].root.layout.padding.top,24);assert.equal(x.screens[0].root.children[0].text,'Một cấu trúc JSON riêng');assert.equal(x.screens[0].root.children[1].style.background.r,0x73/255);});
+test('legacy corrupted text produces actionable error',()=>{assert.throws(()=>L.normalize({root:{type:'TEXT',text:{wrapped:true}}}),/xuất lại/);});
+test('legacy bounds and multiple screens',()=>{const x=L.normalize({screens:[{width:390,root:{type:'TEXT',text:'A',bounds:{width:120,height:30}}},{width:1440,root:{type:'TEXT',text:'B'}}]});assert.equal(x.screens.length,2);assert.equal(x.screens[0].root.rect.w,120);});
+test('different DOM keys are mapped explicitly',()=>{const html=L.domHTML(require('../examples/custom-dom.json'),{tag:'element',children:'items',text:'content',style:'css'});assert.match(html,/<section/);assert.match(html,/flex-direction:column/);assert.match(html,/data-figma-component="Button"/);});
+test('unknown JSON is rejected, not silently rendered empty',()=>{assert.throws(()=>L.normalize({products:[]}),/Không nhận diện/);assert.throws(()=>L.domHTML({foo:'div'}),/Không tìm thấy/);});
+test('token aliases and cycles',()=>{assert.equal(L.tokens({a:{$value:24},b:{$value:'{a}'}}).b,24);assert.throws(()=>L.tokens({a:{$value:'{b}'},b:{$value:'{a}'}}),/vòng/);});
+test('DOM text is escaped and executable elements rejected',()=>{assert.match(L.domHTML({tag:'p',text:'<script>'}),/&lt;script&gt;/);assert.throws(()=>L.domHTML({tag:'script'}),/không hỗ trợ/);});
+test('invalid child structure and dimensions rejected',()=>{assert.throws(()=>L.normalize({root:{children:{}}}),/mảng/);assert.throws(()=>L.normalize({root:{width:-3}}),/số dương|viewport.width/);});

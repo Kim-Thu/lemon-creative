@@ -1,0 +1,86 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  *{box-sizing:border-box}
+  body{
+    margin:0;padding:18px;font:12px/1.5 Inter,system-ui,sans-serif;
+    color:var(--figma-color-text);background:var(--figma-color-bg)
+  }
+  h1{font-size:16px;margin:0 0 6px}
+  p{color:var(--figma-color-text-secondary);margin:0 0 14px}
+  label{display:block;font-weight:600;margin:12px 0 6px}
+  input[type=file],input[type=number]{
+    width:100%;border:1px solid var(--figma-color-border);
+    background:var(--figma-color-bg-secondary);color:var(--figma-color-text);
+    border-radius:8px;padding:9px
+  }
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  button{
+    width:100%;border:0;border-radius:8px;padding:10px 12px;
+    font-weight:700;cursor:pointer
+  }
+  #importBtn{background:#18a0fb;color:white;margin-top:14px}
+  #importBtn:disabled{opacity:.45;cursor:not-allowed}
+  .secondary{
+    background:var(--figma-color-bg-secondary);color:var(--figma-color-text);
+    border:1px solid var(--figma-color-border);margin-top:8px
+  }
+  #status{
+    margin-top:12px;padding:10px;border-radius:8px;
+    background:var(--figma-color-bg-secondary);min-height:38px
+  }
+  .hint{font-size:11px;color:var(--figma-color-text-tertiary);margin-top:8px}
+  #previewWrap{
+    height:220px;margin-top:14px;overflow:hidden;border:1px solid var(--figma-color-border);
+    border-radius:8px;background:white;position:relative
+  }
+  #preview{
+    position:absolute;left:0;top:0;transform-origin:0 0;border:0;background:white
+  }
+</style>
+</head>
+<body>
+  <h1>HTML / JSON → Figma</h1>
+  <p>Chọn HTML hoặc JSON để tạo layer có thể chỉnh sửa trong Figma.</p>
+
+  <label>1. Chọn file HTML / JSON</label>
+  <input id="file" type="file" accept=".html,.htm,.json,text/html,application/json">
+
+  <div class="row">
+    <div>
+      <label>Viewport width</label>
+      <input id="width" type="number" value="1440" min="320" max="2560">
+    </div>
+    <div>
+      <label>Chờ render (ms)</label>
+      <input id="delay" type="number" value="2500" min="0" max="10000">
+    </div>
+  </div>
+
+  <details><summary>Hoặc dán nội dung / ánh xạ JSON</summary>
+    <label for="source">HTML hoặc JSON</label><textarea id="source" rows="5" style="width:100%"></textarea>
+    <label for="format">Cấu trúc đầu vào</label><select id="format"><option value="auto">Tự nhận diện</option><option value="html">HTML</option><option value="scene">JSON layer / snapshot</option><option value="dom">JSON dạng DOM</option></select>
+    <label for="mapping">Ánh xạ JSON DOM (tên trường)</label><textarea id="mapping" rows="2" style="width:100%">{"tag":"tag","children":"children","text":"text","style":"style","attributes":"attributes"}</textarea>
+  </details>
+  <label for="viewports">Kích thước bổ sung cho HTML / JSON DOM</label>
+  <input id="viewports" type="text" value="768, 390" style="width:100%">
+  <div class="hint">Để trống nếu chỉ cần kích thước chính. JSON layer dùng các screens có sẵn.</div>
+  <label><input id="components" type="checkbox" checked> Tạo component từ data-figma-component / component</label>
+  <label><input id="tokens" type="checkbox" checked> Tạo và gắn design token (Variables)</label>
+  <button id="importBtn" disabled>Render và import vào Figma</button>
+  <button id="closeBtn" class="secondary">Đóng</button>
+
+  <div id="status">Chưa chọn file.</div>
+  <div class="hint">
+    Flex / luồng thường → Auto Layout; grid đều → Wrap. Media query được đo lại cho từng màn hình. HTML không chạy JavaScript.
+  </div>
+
+  <div id="previewWrap">
+    <iframe id="preview" sandbox="allow-same-origin"></iframe>
+  </div>
+
+<!-- BUNDLE -->
+</body>
+</html>

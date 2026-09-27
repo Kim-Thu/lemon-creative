@@ -1,0 +1,9 @@
+{
+  "title":"JSON Scene",
+  "viewport":{"width":390,"height":600},
+  "tokens":{"color":{"brand":{"$type":"color","$value":"#735467"}},"spacing":{"large":{"$type":"dimension","$value":24}}},
+  "root":{"type":"FRAME","name":"Page","width":390,"layout":{"mode":"VERTICAL","width":"FILL","height":"HUG","padding":"{spacing.large}","gap":24},"children":[
+    {"type":"TEXT","text":"Một cấu trúc JSON riêng","style":{"font":{"size":28}},"layout":{"width":"FILL","height":"HUG"}},
+    {"type":"COMPONENT","name":"Button / Primary","width":342,"height":56,"style":{"background":"{color.brand}","radius":8},"layout":{"mode":"HORIZONTAL","width":"FILL","height":"HUG","padding":16,"justify":"center"},"children":[{"type":"TEXT","text":"Bắt đầu","style":{"color":"#ffffff"},"layout":{"width":"HUG","height":"HUG"}}]}
+  ]}
+}

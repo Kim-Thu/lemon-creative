@@ -42,11 +42,11 @@
 </style>
 </head>
 <body>
-  <h1>HTML → Figma</h1>
-  <p>Chọn file HTML. Plugin render trang rồi dựng lại hierarchy và Auto Layout trong Figma.</p>
+  <h1>HTML / JSON → Figma</h1>
+  <p>Chọn HTML hoặc JSON để tạo layer có thể chỉnh sửa trong Figma.</p>
 
-  <label>1. Chọn file HTML</label>
-  <input id="file" type="file" accept=".html,.htm,text/html">
+  <label>1. Chọn file HTML / JSON</label>
+  <input id="file" type="file" accept=".html,.htm,.json,text/html,application/json">
 
   <div class="row">
     <div>
@@ -59,19 +59,154 @@
     </div>
   </div>
 
+  <details><summary>Hoặc dán nội dung / ánh xạ JSON</summary>
+    <label for="source">HTML hoặc JSON</label><textarea id="source" rows="5" style="width:100%"></textarea>
+    <label for="format">Cấu trúc đầu vào</label><select id="format"><option value="auto">Tự nhận diện</option><option value="html">HTML</option><option value="scene">JSON layer / snapshot</option><option value="dom">JSON dạng DOM</option></select>
+    <label for="mapping">Ánh xạ JSON DOM (tên trường)</label><textarea id="mapping" rows="2" style="width:100%">{"tag":"tag","children":"children","text":"text","style":"style","attributes":"attributes"}</textarea>
+  </details>
+  <label for="viewports">Kích thước bổ sung cho HTML / JSON DOM</label>
+  <input id="viewports" type="text" value="768, 390" style="width:100%">
+  <div class="hint">Để trống nếu chỉ cần kích thước chính. JSON layer dùng các screens có sẵn.</div>
+  <label><input id="components" type="checkbox" checked> Tạo component từ data-figma-component / component</label>
+  <label><input id="tokens" type="checkbox" checked> Tạo và gắn design token (Variables)</label>
   <button id="importBtn" disabled>Render và import vào Figma</button>
   <button id="closeBtn" class="secondary">Đóng</button>
 
   <div id="status">Chưa chọn file.</div>
   <div class="hint">
-    Flex → Auto Layout, Grid → Figma Grid, absolute/fixed giữ absolute positioning.
+    Flex / luồng thường → Auto Layout; grid đều → Wrap. Media query được đo lại cho từng màn hình. HTML không chạy JavaScript.
   </div>
 
   <div id="previewWrap">
-    <iframe id="preview" sandbox="allow-scripts allow-same-origin"></iframe>
+    <iframe id="preview" sandbox="allow-same-origin"></iframe>
   </div>
 
 <script>
+/* Shared contract: adapters never assume that arbitrary JSON is a DOM tree. */
+const Lemon = (() => {
+  const fail = (path, message) => { throw new Error(`${path}: ${message}`); };
+  const number = (v, fallback = 0) => Number.isFinite(Number(v)) ? Number(v) : fallback;
+  const color = value => {
+    if (value == null) return null;
+    if (typeof value === 'object' && ['r','g','b'].every(k => Number.isFinite(value[k]) && value[k]>=0 && value[k]<=1))
+      return {r:value.r,g:value.g,b:value.b,a:Math.max(0,Math.min(1,value.a ?? 1))};
+    const h = String(value).match(/^#([\da-f]{3,8})$/i);
+    if (h && [3,4,6,8].includes(h[1].length)) {
+      const hex = h[1].length < 5 ? [...h[1]].map(x=>x+x).join('') : h[1];
+      return {r:parseInt(hex.slice(0,2),16)/255,g:parseInt(hex.slice(2,4),16)/255,b:parseInt(hex.slice(4,6),16)/255,a:hex.length===8?parseInt(hex.slice(6),16)/255:1};
+    }
+    const rgb=String(value).match(/^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.]+))?\s*\)$/);
+    return rgb ? {r:+rgb[1]/255,g:+rgb[2]/255,b:+rgb[3]/255,a:rgb[4]==null?1:+rgb[4]} : null;
+  };
+  function tokens(input = {}, prefix = '', out = {}) {
+    for (const [key, value] of Object.entries(input)) {
+      const name = prefix ? `${prefix}/${key}` : key;
+      if(value && typeof value === 'object' && ('$value' in value || 'value' in value)) out[name]=value.$value ?? value.value;
+      else if(value && typeof value === 'object' && !('r' in value)) tokens(value,name,out);
+      else out[name]=value;
+    }
+    const resolve=(name, seen=new Set())=>{
+      if(seen.has(name)) fail('tokens/'+name,'Tham chiếu vòng');
+      const v=out[name], ref=typeof v==='string' && v.match(/^\{([^}]+)\}$/);
+      if(!ref) return v;
+      const target=ref[1].replace(/\./g,'/');
+      if(!(target in out)) fail('tokens/'+name,`Không tìm thấy ${target}`);
+      return resolve(target,new Set([...seen,name]));
+    };
+    for(const name of Object.keys(out)) out[name]=resolve(name);
+    return out;
+  }
+  function normalize(input) {
+    if (!input || typeof input!=='object' || Array.isArray(input)) fail('
+</body>
+</html>
+,'Cần object chứa root, nodes hoặc screens');
+    const warnings = [...(input.warnings || [])], flatTokens=tokens(input.tokens || {});
+    const resolve=v=>typeof v==='string' && /^\{.+\}$/.test(v) ? flatTokens[v.slice(1,-1).replace(/\./g,'/')] ?? fail('
+</body>
+</html>
+,'Token không tồn tại: '+v) : v;
+    let count=0;
+    function node(raw,path,depth=0,parentWidth=1440) {
+      if(++count>20000 || depth>80) fail(path,'Vượt giới hạn 20.000 layer / 80 cấp');
+      if(!raw || typeof raw!=='object' || Array.isArray(raw)) fail(path,'Layer phải là object');
+      const type=String(raw.type || (raw.text!=null?'TEXT':'FRAME')).toUpperCase();
+      if(!['FRAME','TEXT','IMAGE','SVG','COMPONENT','INSTANCE'].includes(type)) fail(path,`Loại layer chưa hỗ trợ: ${type}`);
+      if(type==='INSTANCE') fail(path,'Dùng component trên một cây đầy đủ; instance chỉ có ID chưa đủ dữ liệu');
+      const rect=raw.rect || raw.bounds || {};
+      const dimension=(v,fallback)=> v==null?fallback : Number.isFinite(Number(v)) && Number(v)>0 ? Number(v) : fail(path,'Kích thước phải là số dương');
+      const w=dimension(rect.w ?? rect.width ?? raw.width,parentWidth),h=dimension(rect.h ?? rect.height ?? raw.height,type==='TEXT'?24:100);
+      const tokenBindings={...(raw.tokenBindings||{})};
+      const ref=v=>typeof v==='string' && /^\{.+\}$/.test(v)?v.slice(1,-1).replace(/\./g,'/'):null;
+      for(const [field,value] of Object.entries({fills:raw.style?.background,color:raw.style?.color,fontSize:raw.style?.font?.size,itemSpacing:raw.layout?.gap})) if(ref(value)) tokenBindings[field]=ref(value);
+      for(const [field,value] of Object.entries({paddingTop:raw.layout?.padding?.top??raw.layout?.padding,paddingRight:raw.layout?.padding?.right??raw.layout?.padding,paddingBottom:raw.layout?.padding?.bottom??raw.layout?.padding,paddingLeft:raw.layout?.padding?.left??raw.layout?.padding,topLeftRadius:raw.style?.radius?.tl??raw.style?.radius,topRightRadius:raw.style?.radius?.tr??raw.style?.radius,bottomLeftRadius:raw.style?.radius?.bl??raw.style?.radius,bottomRightRadius:raw.style?.radius?.br??raw.style?.radius})) if(ref(value)) tokenBindings[field]=ref(value);
+      const style=JSON.parse(JSON.stringify(raw.style || {}));
+      for(const k of ['background','color']) if(style[k]!=null) {
+        style[k]=color(resolve(style[k])); if(!style[k]) fail(path+'.style.'+k,'Màu chưa hỗ trợ; dùng HEX hoặc RGBA');
+      }
+      if(typeof style.radius==='number' || typeof style.radius==='string') {const r=number(resolve(style.radius));style.radius={tl:r,tr:r,br:r,bl:r};}
+      if(style.font?.size!=null) style.font.size=number(resolve(style.font.size),16);
+      const l={...(raw.layout||{})};
+      l.mode=String(l.mode || 'VERTICAL').toUpperCase();
+      if(!['NONE','VERTICAL','HORIZONTAL','GRID'].includes(l.mode)) fail(path+'.layout','Mode không hợp lệ');
+      if(l.gap!=null) l.gap=number(resolve(l.gap));
+      if(typeof l.padding==='number' || typeof l.padding==='string') {const p=number(resolve(l.padding));l.padding={top:p,right:p,bottom:p,left:p};}
+      if(l.padding) for(const k of ['top','right','bottom','left']) l.padding[k]=Math.max(0,number(resolve(l.padding[k])));
+      for(const axis of ['width','height']) if(l[axis]!=null && !['FILL','HUG','FIXED'].includes(l[axis])) fail(path+'.layout.'+axis,'Dùng FILL, HUG hoặc FIXED');
+      const text=raw.characters ?? (typeof raw.text==='string'?raw.text:raw.text?.value);
+      if(type==='TEXT' && typeof text!=='string') fail(path+'.text','Thiếu nội dung chữ. Export cũ có thể đã ghi đè text; hãy xuất lại');
+      const result={...raw,tokenBindings,type:type==='COMPONENT'?'FRAME':type,style,layout:l,text,
+        component:raw.component || (type==='COMPONENT'?raw.name || path:undefined),
+        textLayout:raw.textLayout || (typeof raw.text==='object'?raw.text:{}),
+        rect:{x:number(rect.x),y:number(rect.y),w,h},children:[]};
+      const children=raw.children || [];
+      if(!Array.isArray(children)) fail(path+'.children','Cần một mảng');
+      result.children=children.map((c,i)=>node(c,`${path}.children[${i}]`,depth+1,Math.max(1,w-(l.padding?.left||0)-(l.padding?.right||0))));
+      if(result.type==='FRAME' && l.mode==='NONE' && result.children.length) warnings.push(`${raw.name||path}: giữ vị trí tự do vì dữ liệu không có quy tắc layout.`);
+      if(result.type==='SVG' && typeof raw.svg!=='string') fail(path+'.svg','Thiếu SVG');
+      return result;
+    }
+    const sources=input.screens || [input];
+    if(!Array.isArray(sources) || !sources.length || sources.length>10) fail('screens','Cần 1–10 màn hình');
+    const screens=sources.map((s,i)=>{
+      const root=s.root || (s.nodes?{name:s.name||'Page',children:s.nodes,layout:{mode:'VERTICAL',width:'FILL',height:'HUG'}}:s.type?s:null);
+      if(!root) fail(`screens[${i}]`,'Không nhận diện được cấu trúc. Chọn JSON dạng DOM và ánh xạ tên trường nếu cần');
+      const width=number(s.viewport?.width ?? s.width ?? root.rect?.w ?? root.width,1440);
+      if(width<1 || width>10000) fail('viewport.width','Giá trị phải từ 1 đến 10000');
+      return {title:s.title||s.name||input.title||`Screen ${i+1}`,viewport:{width,height:number(s.viewport?.height,900)},root:node(root,`screens[${i}].root`,0,width)};
+    });
+    return {version:4,screens,tokens:flatTokens,warnings:[...new Set(warnings)]};
+  }
+  // JSON DOM adapter: maps independent field names; output is sanitized before rendering.
+  function domHTML(input, mapping={}) {
+    const m={tag:'tag',children:'children',text:'text',style:'style',attributes:'attributes',...mapping};
+    const escape=v=>String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    let count=0;
+    function walk(n,depth=0){
+      if(++count>20000 || depth>80) fail('JSON DOM','Quá nhiều node');
+      if(typeof n==='string' || typeof n==='number') return escape(n);
+      if(!n || typeof n!=='object') fail('JSON DOM','Node không hợp lệ');
+      if(Array.isArray(n)) return n.map(x=>walk(x,depth+1)).join('');
+      const tag=n[m.tag];
+      if(typeof tag!=='string' || !/^[a-z][a-z0-9-]*$/i.test(tag)) fail('JSON DOM',`Không tìm thấy thẻ HTML ở trường "${m.tag}"`);
+      if(['script','iframe','object','embed','base','meta','link'].includes(tag.toLowerCase())) fail('JSON DOM',`Thẻ không hỗ trợ: ${tag}`);
+      let attrs='';
+      for(const [key,value] of Object.entries(n[m.attributes]||{})) if(/^[\w-]+$/.test(key) && !/^on/i.test(key) && !['srcdoc','style'].includes(key)) attrs+=` ${key}="${escape(value)}"`;
+      const css=n[m.style];
+      if(css) attrs+=` style="${escape(typeof css==='string'?css:Object.entries(css).map(([k,v])=>k.replace(/[A-Z]/g,c=>'-'+c.toLowerCase())+':'+v).join(';'))}"`;
+      if(n.component) attrs+=` data-figma-component="${escape(n.component)}"`;
+      const text=n[m.text]==null?'':escape(n[m.text]);
+      const children=n[m.children]||[];
+      if(!Array.isArray(children)) fail('JSON DOM',m.children+' phải là mảng');
+      return `<${tag}${attrs}>${text}${children.map(c=>walk(c,depth+1)).join('')}</${tag}>`;
+    }
+    return '<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0}</style></head><body>'+walk(input.root || input)+'</body></html>';
+  }
+  return {normalize,domHTML,color,tokens};
+})();
+if(typeof module!=='undefined') module.exports=Lemon;
+
+
 const fileEl = document.getElementById("file");
 const widthEl = document.getElementById("width");
 const delayEl = document.getElementById("delay");
@@ -82,6 +217,29 @@ const iframe = document.getElementById("preview");
 const wrap = document.getElementById("previewWrap");
 
 let sourceHtml = "";
+let inputText = "", fileName = "", captureWarnings=[];
+const sourceEl=document.getElementById('source');
+const formatEl=document.getElementById('format');
+const mappingEl=document.getElementById('mapping');
+const viewportsEl=document.getElementById('viewports');
+function prepareSource(){
+  const value=sourceEl.value.trim() || inputText.trim();
+  if(value.length>20*1024*1024) throw new Error('Nội dung vượt 20 MB.');
+  const format=formatEl.value;
+  if(format==='html' || format==='auto' && value.startsWith('<')) return {html:value};
+  const data=JSON.parse(value);
+  if(format==='dom' || format==='auto' && (data.tag || data.root?.tag && !data.root?.rect)) return {html:Lemon.domHTML(data,JSON.parse(mappingEl.value)),tokens:data.tokens||{}};
+  return {scene:Lemon.normalize(data)};
+}
+function sanitizedHTML(html){
+  const doc=new DOMParser().parseFromString(html,'text/html');
+  if(doc.querySelector('script')) captureWarnings.push('HTML có JavaScript: script không chạy. Với trang phụ thuộc JS/Tailwind CDN, hãy dùng export-devtools.js trên trang đã render.');
+  doc.querySelectorAll('script,iframe,object,embed,base,meta[http-equiv]').forEach(n=>n.remove());
+  doc.querySelectorAll('*').forEach(el=>{for(const a of [...el.attributes]) if(/^on/i.test(a.name) || ['srcdoc'].includes(a.name) || /^(?:javascript|vbscript):/i.test(a.value.trim())) el.removeAttribute(a.name);});
+  return '<!doctype html>'+doc.documentElement.outerHTML;
+}
+function timeout(promise,ms,label){return Promise.race([promise,new Promise((_,reject)=>setTimeout(()=>reject(new Error(label)),ms))]);}
+
 
 const wait = ms => new Promise(r => setTimeout(r, ms));
 const px = v => {
@@ -92,7 +250,7 @@ const round = n => Math.round(n * 100) / 100;
 
 function rgba(s){
   const m = String(s || "").match(/rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.]+))?\s*\)/i);
-  if(!m) return null;
+  if(!m) return Lemon.color(s);
   return {r:+m[1]/255,g:+m[2]/255,b:+m[3]/255,a:m[4]==null?1:+m[4]};
 }
 
@@ -162,7 +320,14 @@ function layoutInfo(el,cs){
   const innerW=pr&&pcs?pr.width-px(pcs.paddingLeft)-px(pcs.paddingRight):null;
   const innerH=pr&&pcs?pr.height-px(pcs.paddingTop)-px(pcs.paddingBottom):null;
 
+  const typed=el.computedStyleMap?.();
   const common={
+    autoHeight:typed?.get("height")?.toString()==="auto",
+    centered:typed?.get("margin-left")?.toString()==="auto" && typed?.get("margin-right")?.toString()==="auto",
+    order:px(cs.order),
+    minWidth:cs.minWidth==='auto'?null:px(cs.minWidth),maxWidth:cs.maxWidth==='none'?null:px(cs.maxWidth),
+    minHeight:cs.minHeight==='auto'?null:px(cs.minHeight),maxHeight:cs.maxHeight==='none'?null:px(cs.maxHeight),
+    padding:{top:px(cs.paddingTop),right:px(cs.paddingRight),bottom:px(cs.paddingBottom),left:px(cs.paddingLeft)},
     display:cs.display,position:cs.position,
     zIndex:cs.zIndex==="auto"?null:parseInt(cs.zIndex,10)||0,
     margin:{top:px(cs.marginTop),right:px(cs.marginRight),bottom:px(cs.marginBottom),left:px(cs.marginLeft)},
@@ -178,7 +343,7 @@ function layoutInfo(el,cs){
     return {
       ...common,mode:horizontal?"HORIZONTAL":"VERTICAL",
       reverse:cs.flexDirection.endsWith("reverse"),
-      wrap:cs.flexWrap!=="nowrap",gap:px(cs.gap),
+      wrap:cs.flexWrap!=="nowrap",gap:px(horizontal?cs.columnGap:cs.rowGap),
       rowGap:px(cs.rowGap||cs.gap),columnGap:px(cs.columnGap||cs.gap),
       padding:{top:px(cs.paddingTop),right:px(cs.paddingRight),bottom:px(cs.paddingBottom),left:px(cs.paddingLeft)},
       justify:cs.justifyContent,align:cs.alignItems
@@ -228,20 +393,22 @@ async function imageData(src,doc){
 
 async function snapshot(doc){
   const win=doc.defaultView;
+  let captured=0;
   const skip=new Set(["SCRIPT","STYLE","NOSCRIPT","LINK","META","HEAD","TEMPLATE"]);
 
   async function walk(el,depth=0){
-    if(depth>60||skip.has(el.tagName)) return null;
+    if(depth>80 || ++captured>20000) throw new Error("HTML vượt giới hạn 20.000 node / 80 cấp.");
+    if(skip.has(el.tagName)) return null;
 
     const cs=win.getComputedStyle(el);
     const r=el.getBoundingClientRect();
     if(!visible(el,cs,r)) return null;
 
     const style=styleInfo(cs);
-    const type=el.tagName==="IMG"?"IMAGE":el.tagName==="SVG"?"SVG":"FRAME";
+    const type=el.tagName.toLowerCase()==="img"?"IMAGE":el.tagName.toLowerCase()==="svg"?"SVG":"FRAME";
 
     const node={
-      type,tag:el.tagName.toLowerCase(),name:getName(el),
+      type,tag:el.tagName.toLowerCase(),name:getName(el),component:el.getAttribute("data-figma-component")||(el.tagName.toLowerCase()==="button"?"Button":undefined),
       rect:rectOf(el),style,layout:layoutInfo(el,cs),children:[]
     };
 
@@ -258,30 +425,36 @@ async function snapshot(doc){
       return node;
     }
 
+    if(cs.backgroundImage!=='none') captureWarnings.push(getName(el)+': background-image/gradient chưa chuyển được; dùng thẻ img cho ảnh.');
+    for(const pseudo of ['::before','::after']) {const p=win.getComputedStyle(el,pseudo);if(p.content && !['none','normal','""'].includes(p.content)) captureWarnings.push(getName(el)+': có nội dung '+pseudo+' chưa được nhập.');}
     for(const childNode of [...el.childNodes]){
+      if(childNode.nodeType===Node.ELEMENT_NODE){const c=await walk(childNode,depth+1);if(c) node.children.push(c);continue;}
       if(childNode.nodeType!==Node.TEXT_NODE) continue;
-      const text=childNode.textContent.replace(/\s+/g," ").trim();
-      if(!text) continue;
+      const text=childNode.textContent.replace(/\s+/g," ");
+      if(!text.trim()) continue;
       const tr=rangeRect(doc,childNode);
       if(tr.w<=.5||tr.h<=.5) continue;
       const lineHeight=style.font.lineHeight||style.font.size*1.2;
       node.children.push({
         type:"TEXT",name:text.slice(0,80),text,rect:tr,style,
         layout:{mode:"NONE",position:"static",contentSized:tr.h<=lineHeight*1.35,fillsParentWidth:false,fillsParentHeight:false},
-        text:{wrapped:tr.h>lineHeight*1.35},children:[]
+        textLayout:{wrapped:tr.h>lineHeight*1.35},children:[]
       });
     }
 
-    for(const child of el.children){
-      const c=await walk(child,depth+1);
-      if(c) node.children.push(c);
+    if(node.layout.mode==='GRID') {
+      const regular=node.children.filter(c=>!['absolute','fixed'].includes(c.layout.position));
+      const widths=regular.map(c=>c.rect.w);
+      const spans=[...el.children].some(c=>/span/.test(win.getComputedStyle(c).gridColumn)||/span/.test(win.getComputedStyle(c).gridRow));
+      if(spans || widths.some(w=>Math.abs(w-widths[0])>2)) {node.layout.mode='NONE';node.layout.freeform=true;captureWarnings.push(node.name+': grid có span/cột không đều; giữ tọa độ để tránh đổi bố cục.');}
     }
-
+    if(!node.layout.freeform) inferFlow(node);
     return node;
   }
 
   return {
-    version:3,
+    version:4,
+    tokens:cssTokens(doc),
     title:doc.title||"HTML Import",
     viewport:{
       width:Math.max(doc.documentElement.scrollWidth,doc.body.scrollWidth,parseInt(iframe.style.width)||1440),
@@ -291,60 +464,84 @@ async function snapshot(doc){
   };
 }
 
-async function renderSource(){
-  const viewportWidth=Math.max(320,Number(widthEl.value)||1440);
-  iframe.style.width=viewportWidth+"px";
-  iframe.style.height="1200px";
-  iframe.srcdoc=sourceHtml;
-
-  await new Promise((resolve,reject)=>{
-    const timeout=setTimeout(()=>reject(new Error("HTML render timeout")),15000);
-    iframe.onload=()=>{clearTimeout(timeout);resolve();};
+function cssTokens(doc){
+  const cs=doc.defaultView.getComputedStyle(doc.documentElement),result={};
+  for(const prop of [...cs]) if(prop.startsWith('--')) {
+    const value=cs.getPropertyValue(prop).trim(),c=rgba(value);
+    if(c) result[prop.slice(2)]=c;
+    else if(/^-?[\d.]+(?:px)?$/.test(value)) result[prop.slice(2)]=parseFloat(value);
+  }
+  return result;
+}
+function inferFlow(node){
+  const children=node.children.filter(c=>!['absolute','fixed'].includes(c.layout?.position));
+  const l=node.layout;
+  if(l.mode!=='NONE' || !children.length) return;
+  const vertical=children.every((c,i)=>!i || c.rect.y>=children[i-1].rect.y+children[i-1].rect.h-2);
+  const horizontal=children.every((c,i)=>!i || c.rect.x>=children[i-1].rect.x+children[i-1].rect.w-2);
+  if(!vertical && !horizontal){captureWarnings.push(node.name+': luồng chồng lấn/inline phức tạp, giữ vị trí tự do.');return;}
+  l.mode=vertical?'VERTICAL':'HORIZONTAL';
+  l.autoHeight=l.autoHeight!==false;
+  // Measured gaps preserve collapsed margins and each child's actual alignment.
+  const axis=vertical?'y':'x',size=vertical?'h':'w',cross=vertical?'x':'y',crossSize=vertical?'w':'h';
+  const start=vertical?'top':'left',end=vertical?'bottom':'right';
+  const crossStart=vertical?'left':'top',crossEnd=vertical?'right':'bottom';
+  l.padding=l.padding||{};
+  l.padding[start]=Math.max(0,children[0].rect[axis]-node.rect[axis]);
+  const last=children[children.length-1];
+  l.padding[end]=Math.max(0,node.rect[axis]+node.rect[size]-last.rect[axis]-last.rect[size]);
+  l.gap=0;
+  node.children=node.children.map(c=>{
+    const i=children.indexOf(c);if(i<0)return c;
+    const gap=i?Math.max(0,c.rect[axis]-children[i-1].rect[axis]-children[i-1].rect[size]):0;
+    let offset=Math.max(0,c.rect[cross]-node.rect[cross]-(l.padding[crossStart]||0));
+    let remaining=Math.max(0,node.rect[crossSize]-(l.padding[crossStart]||0)-(l.padding[crossEnd]||0)-offset-c.rect[crossSize]);
+    const centered=vertical && c.layout.centered;
+    if(centered){offset=0;remaining=0;}
+    if(!centered && !gap && !offset && !remaining) {if(vertical && c.type==='TEXT') c.layout.width='FILL';return c;}
+    const padding={top:0,right:0,bottom:0,left:0};padding[start]=gap;padding[crossStart]=offset;padding[crossEnd]=remaining;
+    c={...c,layout:{...c.layout,width:vertical?'FILL':c.layout.width,height:vertical?c.type==='TEXT'?'HUG':c.layout.height:'FILL'}};
+    return {type:'FRAME',name:c.name+' / spacing',rect:{...c.rect,[axis]:c.rect[axis]-gap,[size]:c.rect[size]+gap,[cross]:node.rect[cross]+(l.padding[crossStart]||0),[crossSize]:node.rect[crossSize]-(l.padding[crossStart]||0)-(l.padding[crossEnd]||0)},style:{},layout:{mode:vertical?'VERTICAL':'HORIZONTAL',padding,align:centered?'center':'start',width:vertical?'FILL':'HUG',height:vertical?'HUG':'FIXED'},children:[c]};
   });
-
+}
+async function renderSource(viewportWidth=Number(widthEl.value)||1440){
+  iframe.style.width=viewportWidth+'px';iframe.style.height='1200px';
+  await new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>reject(new Error('HTML render timeout')),15000);
+    iframe.onload=()=>{clearTimeout(timer);resolve();};
+    iframe.srcdoc=sanitizedHTML(sourceHtml);
+  });
   const doc=iframe.contentDocument;
-  try{ if(doc.fonts&&doc.fonts.ready) await doc.fonts.ready; }catch(_){}
-  await wait(Math.max(0,Number(delayEl.value)||0));
-
-  const scale=Math.min(
-    wrap.clientWidth/viewportWidth,
-    wrap.clientHeight/Math.max(1,doc.documentElement.scrollHeight),
-    .28
-  );
-  iframe.style.transform="scale("+Math.max(.08,scale)+")";
+  if(doc.fonts) await timeout(doc.fonts.ready,10000,'Font tải quá lâu');
+  await timeout(Promise.all([...doc.images].map(img=>img.complete?Promise.resolve():new Promise(r=>{img.onload=r;img.onerror=r;}))),10000,'Ảnh tải quá lâu').catch(e=>captureWarnings.push(e.message));
+  await wait(Math.max(0,Math.min(10000,Number(delayEl.value)||0)));
+  const scale=Math.min(wrap.clientWidth/viewportWidth,.28);
+  iframe.style.transform='scale('+scale+')';
   return doc;
 }
-
-fileEl.addEventListener("change",async()=>{
-  const file=fileEl.files&&fileEl.files[0];
-  if(!file)return;
-  sourceHtml=await file.text();
-  importBtn.disabled=false;
-  statusEl.textContent="Đã đọc "+file.name+". Đang tạo preview...";
-  try{
-    await renderSource();
-    statusEl.textContent="Preview xong: "+file.name;
-  }catch(e){
-    statusEl.textContent="Preview lỗi: "+e.message;
-  }
+sourceEl.addEventListener('input',()=>{importBtn.disabled=!sourceEl.value.trim()&&!inputText;});
+fileEl.addEventListener('change',async()=>{
+  const file=fileEl.files&&fileEl.files[0];if(!file)return;
+  if(file.size>20*1024*1024){statusEl.textContent='File vượt 20 MB.';return;}
+  inputText=await file.text();fileName=file.name;sourceEl.value='';importBtn.disabled=false;captureWarnings=[];
+  try{const prepared=prepareSource();if(prepared.html){sourceHtml=prepared.html;await renderSource();}statusEl.textContent='Đã đọc '+fileName+'.';}
+  catch(e){statusEl.textContent='Chưa đọc được: '+e.message;}
 });
-
-importBtn.addEventListener("click",async()=>{
-  if(!sourceHtml)return;
-  importBtn.disabled=true;
-  statusEl.textContent="Đang render HTML...";
+importBtn.addEventListener('click',async()=>{
+  importBtn.disabled=true;captureWarnings=[];
   try{
-    const doc=await renderSource();
-    statusEl.textContent="Đang đọc DOM, text bounds và Auto Layout...";
-    const payload=await snapshot(doc);
-    parent.postMessage({
-      pluginMessage:{type:"import",raw:JSON.stringify(payload)}
-    },"*");
-    statusEl.textContent="Đã gửi dữ liệu sang Figma...";
-  }catch(e){
-    statusEl.textContent="Lỗi: "+e.message;
-    importBtn.disabled=false;
-  }
+    const prepared=prepareSource();let payload=prepared.scene;
+    if(prepared.html){
+      sourceHtml=prepared.html;
+      const widths=[...new Set([Number(widthEl.value),...viewportsEl.value.split(',').filter(x=>x.trim()).map(Number)])];
+      if(widths.length>6 || widths.some(w=>!Number.isInteger(w)||w<320||w>3840)) throw new Error('Dùng tối đa 6 chiều rộng từ 320 đến 3840.');
+      const screens=[];let tokens=prepared.tokens||{};
+      for(const width of widths){statusEl.textContent='Đang đo layout ở '+width+'px…';const doc=await renderSource(width);const screen=await snapshot(doc);screen.viewport.width=width;screens.push(screen);tokens={...screen.tokens,...tokens};}
+      payload={version:4,screens,tokens,warnings:[...new Set(captureWarnings)]};
+    }
+    parent.postMessage({pluginMessage:{type:'import',raw:JSON.stringify(payload),options:{components:document.getElementById('components').checked,tokens:document.getElementById('tokens').checked}}},'*');
+    statusEl.textContent='Đang tạo layer, component và token…';
+  }catch(e){statusEl.textContent='Lỗi: '+e.message;importBtn.disabled=false;}
 });
 
 closeBtn.addEventListener("click",()=>{
@@ -352,10 +549,12 @@ closeBtn.addEventListener("click",()=>{
 });
 
 onmessage=(event)=>{
+  if(event.source!==parent)return;
   const msg=event.data.pluginMessage;
   if(!msg)return;
   if(msg.type==="import-done"){
-    statusEl.textContent="Import xong.";
+    statusEl.textContent=`Đã nhập ${msg.screens} màn hình, ${msg.components} component, ${msg.tokens} token.`+(msg.warnings?.length?'\nLưu ý:\n'+msg.warnings.join('\n'):'');
+    statusEl.style.whiteSpace='pre-wrap';
     importBtn.disabled=false;
   }
   if(msg.type==="import-error"){
@@ -363,6 +562,7 @@ onmessage=(event)=>{
     importBtn.disabled=false;
   }
 };
+
 </script>
 </body>
 </html>

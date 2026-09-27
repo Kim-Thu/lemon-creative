@@ -1,0 +1,8 @@
+{
+  "element": "section",
+  "css": {"display":"flex","flexDirection":"column","gap":"24px","padding":"32px","background":"#faf8f4"},
+  "items": [
+    {"element":"h1","content":"JSON không cần giống cấu trúc HTML","css":{"margin":"0"}},
+    {"element":"button","content":"Bắt đầu","component":"Button","css":{"padding":"16px","background":"#735467","color":"#ffffff","border":"0","borderRadius":"8px"}}
+  ]
+}
