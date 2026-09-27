@@ -314,10 +314,18 @@ async function renderSource(viewportWidth=Number(widthEl.value)||1440){
 sourceEl.addEventListener('input',()=>{importBtn.disabled=!sourceEl.value.trim()&&!inputText;});
 fileEl.addEventListener('change',async()=>{
   const file=fileEl.files&&fileEl.files[0];if(!file)return;
-  if(file.size>20*1024*1024){statusEl.textContent='File vượt 20 MB.';return;}
-  inputText=await file.text();fileName=file.name;sourceEl.value='';importBtn.disabled=false;captureWarnings=[];
-  try{const prepared=prepareSource();if(prepared.html){sourceHtml=prepared.html;await renderSource();}statusEl.textContent='Đã đọc '+fileName+'.';}
-  catch(e){statusEl.textContent='Chưa đọc được: '+e.message;}
+  inputText='';sourceHtml='';sourceEl.value='';importBtn.disabled=true;
+  statusEl.textContent='Đang đọc '+file.name+'…';
+  try {
+    if(file.size>20*1024*1024) throw new Error('File vượt 20 MB.');
+    inputText=await file.text();fileName=file.name;captureWarnings=[];
+    if(!inputText.trim()) throw new Error('File không có nội dung.');
+    const prepared=prepareSource();
+    statusEl.textContent='Đã đọc '+fileName+'.';
+    if(prepared.html){sourceHtml=prepared.html;statusEl.textContent='Đã chọn '+fileName+'. Đang tạo preview…';await renderSource();}
+    statusEl.textContent='Đã đọc '+fileName+'. Sẵn sàng import.';
+    importBtn.disabled=false;
+  }catch(e){statusEl.textContent='Không đọc được '+file.name+': '+e.message;}
 });
 importBtn.addEventListener('click',async()=>{
   importBtn.disabled=true;captureWarnings=[];
